@@ -1,56 +1,78 @@
-import pandas as pd
-from transformers import pipeline
-from sklearn.feature_extraction.text import TfidfVectorizer
-import spacy
+# scripts/sentiment_thematic_analysis.py
 
-# Load cleaned reviews
+import pandas as pd
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from sklearn.feature_extraction.text import TfidfVectorizer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+
+# -------------------------
+# 1. Load cleaned reviews
+# -------------------------
 df = pd.read_csv("data/processed/reviews_clean.csv")
 
-# 1️⃣ Sentiment Analysis using DistilBERT
-sentiment_pipeline = pipeline("sentiment-analysis")
+# -------------------------
+# 2. Sentiment Analysis
+# -------------------------
+sia = SentimentIntensityAnalyzer()
 
-def get_sentiment(review):
-    result = sentiment_pipeline(review[:512])[0]  # limit to 512 tokens
-    return result['label'], result['score']
+# Compute sentiment score and label
+df['sentiment_score'] = df['review'].apply(lambda x: sia.polarity_scores(str(x))['compound'])
+df['sentiment_label'] = df['sentiment_score'].apply(
+    lambda x: 'positive' if x > 0.05 else ('negative' if x < -0.05 else 'neutral')
+)
 
-df[['sentiment_label', 'sentiment_score']] = df['review'].apply(lambda x: pd.Series(get_sentiment(x)))
+# Save interim CSV with sentiment
+df.to_csv("data/processed/reviews_with_sentiment.csv", index=False)
 
-# 2️⃣ Thematic Analysis (Keyword Extraction)
-nlp = spacy.load("en_core_web_sm")
+# -------------------------
+# 3. Thematic / Keyword Extraction
+# -------------------------
+themes_per_bank = {}
 
-def preprocess(text):
-    doc = nlp(text.lower())
-    tokens = [token.lemma_ for token in doc if token.is_alpha and not token.is_stop]
-    return " ".join(tokens)
+for bank in df['bank'].unique():
+    bank_reviews = df[df['bank'] == bank]['review'].astype(str)
 
-df['clean_review'] = df['review'].apply(preprocess)
+    # TF-IDF vectorization
+    vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1, 2), max_features=20)
+    X = vectorizer.fit_transform(bank_reviews)
+    keywords = vectorizer.get_feature_names_out()
+    themes_per_bank[bank] = list(keywords)
 
-# TF-IDF for keyword extraction
-vectorizer = TfidfVectorizer(ngram_range=(1,2), max_features=100)
-X = vectorizer.fit_transform(df['clean_review'])
-keywords = vectorizer.get_feature_names_out()
+# Save themes
+themes_df = pd.DataFrame([
+    {"bank": bank, "top_keywords": ", ".join(keywords)}
+    for bank, keywords in themes_per_bank.items()
+])
+themes_df.to_csv("data/processed/review_themes.csv", index=False)
 
-# 3️⃣ Simple Theme Grouping (example)
-# This is rule-based: group related keywords into themes
-themes = {
-    'User Interface & Experience': ['ui', 'design', 'navigation', 'layout'],
-    'Transaction Performance': ['transfer', 'payment', 'slow', 'loading', 'crash'],
-    'Account Access Issues': ['login', 'password', 'otp', 'authentication'],
-    'Customer Support': ['support', 'help', 'service', 'response'],
-    'Feature Requests': ['feature', 'add', 'request', 'update']
-}
+# -------------------------
+# 4. Visualizations
+# -------------------------
 
-def assign_theme(review):
-    assigned = []
-    for theme, kw_list in themes.items():
-        for kw in kw_list:
-            if kw in review:
-                assigned.append(theme)
-                break
-    return assigned if assigned else ['Other']
+# Sentiment distribution per bank
+plt.figure(figsize=(8, 5))
+sns.countplot(data=df, x='sentiment_label', hue='bank')
+plt.title("Sentiment Distribution by Bank")
+plt.xlabel("Sentiment")
+plt.ylabel("Number of Reviews")
+plt.legend(title='Bank')
+plt.tight_layout()
+plt.savefig("data/processed/sentiment_distribution.png")
+plt.close()
 
-df['themes'] = df['clean_review'].apply(assign_theme)
+# WordCloud per bank
+for bank in df['bank'].unique():
+    text = " ".join(df[df['bank'] == bank]['review'].astype(str))
+    wc = WordCloud(width=800, height=400, background_color='white').generate(text)
+    plt.figure(figsize=(10, 5))
+    plt.imshow(wc, interpolation='bilinear')
+    plt.axis('off')
+    plt.title(f"WordCloud for {bank}")
+    plt.tight_layout()
+    plt.savefig(f"data/processed/{bank}_wordcloud.png")
+    plt.close()
 
-# 4️⃣ Save results
-df.to_csv("data/processed/reviews_with_sentiment_themes.csv", index=False)
-print("Sentiment and thematic analysis completed! Saved to data/processed/reviews_with_sentiment_themes.csv")
+print("Sentiment analysis and thematic extraction completed!")
+print("CSV and plots saved to data/processed/")
